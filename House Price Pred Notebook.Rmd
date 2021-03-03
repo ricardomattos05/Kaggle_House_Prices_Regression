@@ -1,0 +1,346 @@
+---
+title: "House Price Prediction"
+author: "Ricardo Mattos"
+date: "27/02/2021"
+output: html_document
+
+---
+
+# Load Packages and Data
+
+Libraries
+```{r}
+library(readr)
+library(tidymodels)
+library(skimr)
+library(stringr)
+library(gridExtra)
+
+theme_set(theme_minimal(14))
+```
+
+
+Reading train and test data
+
+```{r}
+
+train <- read_csv("train.csv")
+test  <- read_csv("test.csv")
+
+train %>% 
+  head()
+```
+
+# EDA
+
+
+```{r}
+str(train)
+
+train %>%
+  select_if(is.numeric) %>% 
+  DataExplorer::create_report()
+```
+
+Take a look in response variable
+
+```{r}
+train %>%
+  ggplot(aes(x = SalePrice)) +
+  geom_histogram()
+
+```
+
+Apparently we have influence of high values in our target.
+
+Lets use log and Square-Root transformation:
+
+```{r}
+log_gg <- train %>%
+  ggplot(aes(x = log(SalePrice))) +
+  geom_histogram()
+
+Sq_gg <- train %>%
+  ggplot(aes(x = sqrt(SalePrice))) +
+  geom_histogram()
+
+grid.arrange(log_gg,Sq_gg)
+```
+
+Log transformation look much better than normal and sqrt transformation.
+
+
+```{r}
+train %>% 
+  # filter(WoodDeckSF >0) %>%
+  ggplot(aes(x = sqrt(X3SsnPorch))) +
+  geom_histogram()
+
+train %>% count(log(Wood))
+# train %>% distinct(MSSubClass) %>% arrange(MSSubClass)
+
+```
+
+
+Some transformations that we'll need to do:
+
+  * Log
+  * sqrt
+  * Categorical Vars that came as numeric
+  
+
+Vars that we'll need to apply log transformation:
+
+- BsmtFinSF1
+- BsmtFinSF2
+- BsmtUnfSF
+- LotArea
+- LotFrontage
+- MasVnrArea
+- X1stFlrSF
+- GrLivArea
+- OpenPorchSF
+
+
+Vars that we'll need to apply sqrt transformation:
+
+- TotalBsmtSF
+- X2ndFlrSF
+- WoodDeckSF
+
+Numeric to categorical
+
+- MSsubClass
+
+
+Lets check the correlation between numerical vars
+
+```{r}
+
+train %>%
+  select_if(is.numeric) %>%
+  select(-c(Id, X1)) %>%
+  mutate_all(log) %>%
+  mutate_all(replace_na, 0) %>%
+  mutate_all(funs(case_when(. == -Inf ~ 0,
+                            T ~ .))) %>%
+  filter(BsmtFinSF1  == 0) %>% 
+  cor() %>%
+  corrplot::corrplot(
+    method = "color",
+    type = "upper",
+    number.cex = .7,
+    tl.cex = 0.8,
+    addCoef.col = "black",
+    tl.col = "black",
+    tl.srt = 90,
+    # Text label color and rotation
+    diag = FALSE
+  )
+
+
+```
+
+
+# Predictive Analysis
+
+Data Prep
+
+```{r}
+
+set.seed(32)
+
+df_split <- initial_split(train, prop = 0.8)
+
+df_train <- training(df_split)
+df_test <- testing(df_split)
+
+```
+
+
+Creating Recipe and Workflow
+
+```{r}
+
+# Creating Recipe
+recipe_house <- recipe(SalePrice  ~ ., data = train) %>%
+  step_rm(Id,
+          X1,
+          GarageYrBlt) %>%
+  step_mutate(MSSubClass = as.factor(MSSubClass)) %>% 
+  step_unknown(all_nominal()) %>% 
+  step_log(BsmtFinSF1,
+            BsmtFinSF2,
+            BsmtUnfSF,
+            LotArea,
+            LotFrontage,
+            MasVnrArea,
+            X1stFlrSF,
+            GrLivArea,
+            OpenPorchSF,
+            SalePrice,
+            offset = 0.999999) %>% 
+  step_sqrt(TotalBsmtSF,
+            X2ndFlrSF,
+            WoodDeckSF) %>% 
+  step_zv(all_predictors()) %>%
+  step_string2factor(all_nominal()) %>%
+  # step_naomit(all_numeric()) %>% 
+  step_bagimpute(all_numeric()) %>% 
+  step_normalize(all_numeric()) %>% 
+  step_novel(all_nominal(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) 
+
+
+# Creating Workflow
+wf <- 
+  workflow() %>% 
+  add_recipe(recipe_house)
+
+
+recipe_house %>%
+prep() %>%
+  juice()
+  # filter(BsmtFinSF1  == -Inf) %>% 
+  # select(BsmtFinSF1) %>% 
+  # ggplot(aes(BsmtFinSF1))+
+  # geom_histogram()
+
+
+```
+
+
+### Cross-Validation
+
+```{r}
+set.seed(32)
+df_vfold <- vfold_cv(train, v = 2)
+df_vfold
+```
+
+
+### Models {.tabset}
+
+The models that we will train are:
+
+  * Linear Regression Lasso Penalization
+  * Random Forest
+  * xgboost
+  
+#### Linear Regression Lasso Penalization
+
+Specifying the model:
+
+```{r}
+
+lasso_LR <- linear_reg(penalty = tune(),
+                       mixture = 1) %>%
+  set_engine("glmnet")
+
+```  
+  
+Workflow to Linear Reg
+
+```{r}
+wf_lr <- wf %>% 
+  add_model(lasso_LR)
+
+```
+
+generating grid to optimize lambda:
+
+```{r}
+set.seed(1234)
+lambda_grid <- grid_regular(penalty(), levels = 40)
+```
+
+
+
+tuning lambda:
+
+```{r}
+set.seed(1234)
+lr_tuned <- tune_grid(
+  wf_lr,
+  resamples = df_vfold,
+  grid = lambda_grid,
+  metrics = metric_set(rmse)
+)
+
+# Checking metrics
+lr_tuned %>%
+  collect_metrics() %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_line(size = 1.5, show.legend = FALSE) +
+  facet_wrap( ~ .metric) +
+  scale_x_log10()
+
+lr_tuned %>%
+  show_best()
+
+# Selecting best value to Lambda
+best_rmse_lr <- lr_tuned %>%
+  select_best("rmse")
+
+```
+
+
+Finalizing workflow
+```{r}
+
+final_lasso <- finalize_workflow(wf_lr, best_rmse_lr)
+
+final_lasso
+
+
+```
+
+
+checking variable importance:
+
+```{r}
+library(vip)
+library(forcats)
+
+vip_ok <- 
+final_lasso %>%
+  fit(train) %>%
+  pull_workflow_fit() %>%
+  vi(lambda = best_rmse_lr$penalty) %>%
+  group_by(Sign) %>%
+  top_n(20, wt = abs(Importance)) %>%
+  ungroup() %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = str_remove(Variable, "tfidf_text_"),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  filter(Importance < 0 | Importance > 0) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col(show.legend = FALSE, width = 0.6) +
+  scale_x_continuous(expand = c(0, 0)) +
+  theme_minimal() +
+  facet_wrap(~ Sign, scales = "free") +
+  labs(y = NULL)+
+  scale_x_continuous(expand = c(0,0), name = "")
+
+
+
+vip_ok
+
+```
+
+results of LR
+
+```{r}
+lr_final <- last_fit(final_lasso, df_split)
+
+lr_final %>%
+  collect_metrics()
+
+
+```
+
+
+
+
