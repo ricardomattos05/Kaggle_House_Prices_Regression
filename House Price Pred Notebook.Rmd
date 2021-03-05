@@ -150,6 +150,10 @@ Data Prep
 
 set.seed(32)
 
+# Trasnf Log da var Resposta
+train <- train %>% 
+  mutate(SalePrice = log(SalePrice))
+
 df_split <- initial_split(train, prop = 0.8)
 
 df_train <- training(df_split)
@@ -163,33 +167,34 @@ Creating Recipe and Workflow
 ```{r}
 
 # Creating Recipe
-recipe_house <- recipe(SalePrice  ~ ., data = train) %>%
+recipe_house <- recipe(SalePrice  ~ ., data = df_train) %>%
   step_rm(Id,
           X1,
           GarageYrBlt) %>%
-  step_mutate(MSSubClass = as.factor(MSSubClass)) %>% 
-  step_unknown(all_nominal()) %>% 
-  step_log(BsmtFinSF1,
-            BsmtFinSF2,
-            BsmtUnfSF,
-            LotArea,
-            LotFrontage,
-            MasVnrArea,
-            X1stFlrSF,
-            GrLivArea,
-            OpenPorchSF,
-            SalePrice,
-            offset = 0.999999) %>% 
+  step_mutate(MSSubClass = as.factor(MSSubClass)) %>%
+  step_unknown(all_nominal()) %>%
+  step_log(
+    BsmtFinSF1,
+    BsmtFinSF2,
+    BsmtUnfSF,
+    LotArea,
+    LotFrontage,
+    MasVnrArea,
+    X1stFlrSF,
+    GrLivArea,
+    OpenPorchSF,
+    offset = 0.999999
+  ) %>%
   step_sqrt(TotalBsmtSF,
             X2ndFlrSF,
-            WoodDeckSF) %>% 
+            WoodDeckSF) %>%
+  step_knnimpute(all_predictors(),-all_outcomes()) %>%
+  step_normalize(all_numeric(),-all_outcomes()) %>%
+  step_other(all_nominal(),-all_outcomes(), threshold = 0.01) %>%
   step_zv(all_predictors()) %>%
   step_string2factor(all_nominal()) %>%
-  # step_naomit(all_numeric()) %>% 
-  step_bagimpute(all_numeric()) %>% 
-  step_normalize(all_numeric()) %>% 
-  step_novel(all_nominal(), -all_outcomes()) %>%
-  step_dummy(all_nominal(), -all_outcomes()) 
+  step_novel(all_nominal(),-all_outcomes()) %>%
+  step_dummy(all_nominal(),-all_outcomes()) 
 
 
 # Creating Workflow
@@ -214,7 +219,7 @@ prep() %>%
 
 ```{r}
 set.seed(32)
-df_vfold <- vfold_cv(train, v = 2)
+df_vfold <- vfold_cv(df_train, v = 3)
 df_vfold
 ```
 
@@ -288,9 +293,9 @@ best_rmse_lr <- lr_tuned %>%
 Finalizing workflow
 ```{r}
 
-final_lasso <- finalize_workflow(wf_lr, best_rmse_lr)
+final_lasso_wf <- finalize_workflow(wf_lr, best_rmse_lr)
 
-final_lasso
+final_lasso_wf
 
 
 ```
@@ -303,7 +308,7 @@ library(vip)
 library(forcats)
 
 vip_ok <- 
-final_lasso %>%
+final_lasso_wf %>%
   fit(train) %>%
   pull_workflow_fit() %>%
   vi(lambda = best_rmse_lr$penalty) %>%
@@ -333,13 +338,48 @@ vip_ok
 results of LR
 
 ```{r}
-lr_final <- last_fit(final_lasso, df_split)
+lr_final <- last_fit(final_lasso_wf, df_split)
 
 lr_final %>%
   collect_metrics()
 
+pred_lf_lr <- collect_predictions(lr_final)
+
+pred_lf_lr %>% 
+  select(.pred, SalePrice) %>% 
+  pivot_longer(cols = c(.pred, SalePrice)) %>% 
+  ggplot(aes(value, fill = name))+
+    geom_density(alpha = 0.6)
+
+lr_fit <- fit(final_lasso_wf, train)
 
 ```
+
+```{r}
+
+pred_lr <- predict(lr_fit, test) %>%
+  mutate(.pred = exp(.pred)) %>% 
+  bind_cols("Id" = test$Id, "SalePrice" = .$.pred) %>%
+  select(-.pred) %>% 
+  write.csv(., "submissions/submission_lasso_1.csv", row.names = F)
+  
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
